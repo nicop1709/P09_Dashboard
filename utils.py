@@ -11,28 +11,182 @@ from datetime import datetime, timezone
 def to_ms(dt: datetime) -> int:
     return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
-def fetch_ohlcv_binance(pair: str, timeframe: str, start_date: int, end_date: int, limit=1000):
-    ex = ccxt.binance({"enableRateLimit": True})
+def fetch_ohlcv_from_csv(csv_path: str, start_date: str, end_date: str):
+    """
+    Récupère les données OHLCV depuis un fichier CSV local (fallback).
+    
+    Args:
+        csv_path: Chemin vers le fichier CSV
+        start_date: Date de début (format string)
+        end_date: Date de fin (format string)
+    
+    Returns:
+        DataFrame avec les colonnes Timestamp, Open, High, Low, Close, Volume
+    """
+    try:
+        df = pd.read_csv(csv_path)
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True)
+        
+        start_dt = pd.to_datetime(start_date, utc=True)
+        end_dt = pd.to_datetime(end_date, utc=True)
+        
+        # Filtrer par date
+        df_filtered = df[(df["Timestamp"] >= start_dt) & (df["Timestamp"] <= end_dt)]
+        
+        if len(df_filtered) == 0:
+            # Si aucune donnée dans la plage, prendre les dernières données disponibles
+            df_filtered = df.tail(168)  # 7 jours * 24h = 168 heures
+        
+        df_filtered = df_filtered.sort_values("Timestamp").reset_index(drop=True)
+        return df_filtered
+    
+    except Exception as e:
+        raise Exception(f"Erreur lors de la lecture du CSV: {str(e)}")
+
+def fetch_ohlcv_binance(pair: str, timeframe: str, start_date: int, end_date: int, limit=1000, timeout=30, max_retries=3):
+    """
+    Récupère les données OHLCV depuis Binance avec gestion d'erreur et timeout.
+    
+    Args:
+        pair: Paire de trading (ex: "BTCUSDC")
+        timeframe: Période (ex: "1h")
+        start_date: Date de début (format string ou datetime)
+        end_date: Date de fin (format string ou datetime)
+        limit: Nombre max de candles par requête (défaut: 1000)
+        timeout: Timeout en secondes pour chaque requête (défaut: 30)
+        max_retries: Nombre max de tentatives en cas d'échec (défaut: 3)
+    
+    Returns:
+        DataFrame avec les colonnes Timestamp, Open, High, Low, Close, Volume
+    """
+    import time
+    
+    # Configuration de ccxt avec timeout et options pour Streamlit Community
+    try:
+        ex = ccxt.binance({
+            "enableRateLimit": True,
+            "timeout": timeout * 1000,  # timeout en millisecondes
+            "options": {
+                "defaultType": "spot",  # Utiliser le marché spot
+            },
+            "rateLimit": 1200,  # Limite de rate (ms entre requêtes)
+        })
+        
+        # Essayer de charger les markets manuellement avec gestion d'erreur
+        # Cela évite que load_markets() soit appelé automatiquement lors du premier fetch_ohlcv
+        try:
+            ex.load_markets()
+        except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout, 
+                ccxt.BaseError, Exception) as market_error:
+            # Si le chargement des markets échoue, on continue quand même
+            # car certaines paires peuvent fonctionner sans markets chargés
+            pass
+            
+    except Exception as e:
+        raise Exception(f"Erreur lors de l'initialisation de l'exchange Binance: {str(e)}")
+    
     all_rows = []
     since = to_ms(pd.to_datetime(start_date))
     end_ms = to_ms(pd.to_datetime(end_date))
-
+    
+    last_error = None
+    
     while since < end_ms:
-        batch = ex.fetch_ohlcv(pair, timeframe=timeframe, since=since, limit=limit)
+        retry_count = 0
+        batch = None
+        
+        # Tentative de récupération avec retry pour chaque batch
+        while retry_count < max_retries:
+            try:
+                # Tentative de récupération des données
+                # Note: load_markets() est appelé automatiquement par fetch_ohlcv
+                batch = ex.fetch_ohlcv(pair, timeframe=timeframe, since=since, limit=limit)
+                break  # Succès, sortir de la boucle de retry
+                
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout, 
+                    ccxt.BaseError) as e:
+                # Erreur réseau (timeout, connexion, exchange non disponible, etc.)
+                retry_count += 1
+                last_error = e
+                if retry_count < max_retries:
+                    # Attendre avant de réessayer (backoff exponentiel)
+                    wait_time = min(2 ** retry_count, 10)
+                    time.sleep(wait_time)
+                else:
+                    raise Exception(f"Erreur réseau/exchange après {max_retries} tentatives pour la période {since}: {str(e)}")
+            
+            except ccxt.ExchangeError as e:
+                # Erreur de l'exchange (rate limit, etc.)
+                retry_count += 1
+                last_error = e
+                if retry_count < max_retries:
+                    wait_time = min(2 ** retry_count, 10)
+                    time.sleep(wait_time)
+                else:
+                    raise Exception(f"Erreur de l'exchange après {max_retries} tentatives pour la période {since}: {str(e)}")
+            
+            except Exception as e:
+                # Autre erreur - ne pas retry
+                raise Exception(f"Erreur inattendue lors de la récupération des données: {str(e)}")
+        
         if not batch:
             break
+        
         all_rows.extend(batch)
         # avance d'un pas après le dernier timestamp
         since = batch[-1][0] + 1
-
+        
         # sécurité anti-boucle
         if len(batch) < 10:
             break
-
+    
+    if not all_rows:
+        raise Exception(f"Aucune donnée récupérée. Dernière erreur: {last_error}")
+    
     df = pd.DataFrame(all_rows, columns=["Timestamp", "Open", "High", "Low", "Close", "Volume"])
     df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True)
     df = df.drop_duplicates(subset=["Timestamp"]).sort_values("Timestamp").reset_index(drop=True)
     return df
+
+def fetch_ohlcv_binance_with_fallback(pair: str, timeframe: str, start_date: str, end_date: str, 
+                                       csv_path: str = "btc_usdc_1h_2015_2025.csv", 
+                                       timeout: int = 10, max_retries: int = 2):
+    """
+    Récupère les données OHLCV depuis Binance avec fallback vers CSV local.
+    Optimisé pour Streamlit Community avec timeout court et retries limités.
+    
+    Args:
+        pair: Paire de trading (ex: "BTCUSDC")
+        timeframe: Période (ex: "1h")
+        start_date: Date de début (format string)
+        end_date: Date de fin (format string)
+        csv_path: Chemin vers le fichier CSV de fallback
+        timeout: Timeout en secondes (défaut: 10 pour Streamlit Community)
+        max_retries: Nombre max de tentatives (défaut: 2)
+    
+    Returns:
+        Tuple (DataFrame, str): DataFrame avec les colonnes Timestamp, Open, High, Low, Close, Volume
+                               et la source des données ("API Binance" ou "CSV local")
+    """
+    import os
+    
+    # Tentative de récupération via API Binance
+    # On capture TOUTES les exceptions possibles (y compris ExchangeNotAvailable)
+    try:
+        df = fetch_ohlcv_binance(pair, timeframe, start_date, end_date, 
+                                 timeout=timeout, max_retries=max_retries)
+        return df, "API Binance"
+    except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.ExchangeNotAvailable, 
+            ccxt.RequestTimeout, ccxt.BaseError, Exception) as api_error:
+        # En cas d'échec (quel que soit le type d'erreur), utiliser le CSV local
+        if os.path.exists(csv_path):
+            try:
+                df = fetch_ohlcv_from_csv(csv_path, start_date, end_date)
+                return df, "CSV local"
+            except Exception as csv_error:
+                raise Exception(f"Erreur API Binance: {str(api_error)}. Erreur CSV: {str(csv_error)}")
+        else:
+            raise Exception(f"Erreur API Binance: {str(api_error)}. Fichier CSV de fallback non trouvé: {csv_path}")
 
 def plot_backtest(backtester, plot=True):
     # On suppose que trades_df == backtester.df_trades déjà généré avec l'algo ci-dessus

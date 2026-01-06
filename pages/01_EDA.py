@@ -29,7 +29,7 @@ df = pd.read_csv("btc_usdc_1h_2015_2025.csv")
 
 
 # Definir Sidebar
-nb_days_displayed = st.sidebar.slider("Nombre de jours affichés", min_value=1, max_value=100, value=10)
+nb_days_displayed = st.sidebar.slider("Nombre de jours affichés", min_value=1, max_value=100, value=100)
 horizon_steps = st.sidebar.slider("Nombre de bougies 1h pour la prédiction du ROI futur", min_value=1, max_value=24*5, value=24)
 fee_roundtrip = st.sidebar.radio("Fee roundtrip", options=[0.0000, 0.0015, 0.0020], index=2)
 
