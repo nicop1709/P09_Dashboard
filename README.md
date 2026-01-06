@@ -35,6 +35,8 @@ source .venv/bin/activate  # Sur Windows : .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+**Note** : L'installation de PyTorch (requis pour TabNet) peut prendre plusieurs minutes car c'est un package volumineux. La version CPU standard est suffisante pour ce projet. Si vous avez un GPU NVIDIA et souhaitez l'utiliser, vous pouvez installer une version spécifique avec support CUDA depuis [pytorch.org](https://pytorch.org/get-started/locally/).
+
 ## 💻 Utilisation
 
 Lancez le dashboard avec :
@@ -67,6 +69,7 @@ Le dashboard s'ouvrira automatiquement dans votre navigateur (généralement sur
 P09_Dashboard/
 ├── Home.py                 # Page d'accueil Streamlit
 ├── backtest.py             # Classe Backtest pour simuler les stratégies
+├── trader.py               # Classe Trader pour gérer les positions
 ├── utils.py                # Fonctions utilitaires (fetch données, features, graphiques)
 ├── requirements.txt        # Dépendances Python
 ├── pages/
@@ -103,6 +106,7 @@ Les prédictions sont générées pour un horizon de 24 heures (24 bougies de 1h
 - Les prédictions nécessitent une connexion internet pour récupérer les données Binance
 - Le modèle TabNet doit être pré-entraîné (pas d'entraînement dans ce dashboard)
 - Les résultats de backtest sont des simulations et ne garantissent pas les performances futures
+- **PyTorch et pytorch-tabnet sont requis** : Assurez-vous que ces packages sont bien installés, sinon vous obtiendrez une erreur `ModuleNotFoundError: No module named 'pytorch_tabnet'` lors du chargement du modèle
 
 ## 📊 Métriques calculées
 
@@ -118,7 +122,10 @@ Les prédictions sont générées pour un horizon de 24 heures (24 bougies de 1h
 - **Streamlit** : Framework pour le dashboard
 - **Pandas** : Manipulation des données
 - **Plotly** : Visualisations interactives
-- **Scikit-learn** : Machine learning (TabNet via pytorch-tabnet)
+- **PyTorch** : Framework de deep learning (requis pour TabNet)
+- **Pytorch-tabnet** : Implémentation TabNet pour PyTorch
+- **Scikit-learn** : Machine learning et preprocessing
+- **Joblib** : Sauvegarde et chargement des modèles
 - **TA** : Calcul d'indicateurs techniques
 - **CCXT** : API pour récupérer les données Binance
 
