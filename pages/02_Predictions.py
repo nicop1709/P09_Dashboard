@@ -50,7 +50,8 @@ try:
             st.write(f"**Période**: {format(datetime.now()-timedelta(days=7),'%Y-%m-%d')} à {format(datetime.now(),'%Y-%m-%d')}")
             st.write(f"**Timeout**: 15 secondes")
             st.write(f"**Max retries**: 2")
-            st.info("💡 Les logs détaillés sont disponibles dans les logs Streamlit Cloud (voir instructions ci-dessous)")
+            st.info("💡 **Ordre de tentative** : 1) Binance API → 2) Yahoo Finance → 3) CSV local")
+            st.info("💡 Les logs détaillés sont disponibles dans les logs Streamlit Cloud")
         
         last_data, data_source = fetch_ohlcv_binance_with_fallback(
             "BTCUSDC", 
@@ -79,22 +80,30 @@ try:
     # Afficher la source des données
     if data_source == "API Binance":
         st.success("✅ Données récupérées depuis l'API Binance")
+    elif data_source == "Yahoo Finance":
+        st.success("✅ Données récupérées depuis Yahoo Finance")
+        st.info("💡 Yahoo Finance est utilisé car l'API Binance n'est pas accessible depuis Streamlit Cloud (restrictions géographiques).")
     else:
-        st.warning("⚠️ Données récupérées depuis le fichier CSV local (API Binance indisponible)")
-        with st.expander("🔍 Pourquoi l'API Binance ne fonctionne pas ?", expanded=False):
+        st.warning("⚠️ Données récupérées depuis le fichier CSV local (APIs indisponibles)")
+        with st.expander("🔍 Pourquoi les APIs ne fonctionnent pas ?", expanded=False):
             st.markdown("""
-            **Causes possibles :**
-            - ⏱️ **Timeout réseau** : Streamlit Cloud a des limitations de timeout réseau
-            - 🔒 **Restrictions réseau** : Certaines IPs de Streamlit Cloud peuvent être bloquées par Binance
-            - 🌐 **Problèmes DNS** : Résolution DNS depuis les serveurs Streamlit Cloud
-            - 🚫 **Rate limiting** : Binance peut limiter les requêtes depuis certaines IPs
+            **Ordre de tentative des sources de données :**
+            1. 🔄 **API Binance** - Source principale (peut être bloquée depuis Streamlit Cloud)
+            2. 🔄 **Yahoo Finance** - Source alternative (fonctionne généralement depuis Streamlit Cloud)
+            3. 📁 **CSV local** - Dernier recours
             
-            **Solution actuelle :** L'application utilise automatiquement le fichier CSV en cas d'échec de l'API.
+            **Causes possibles d'échec :**
+            - 🔒 **Restrictions géographiques** : Binance bloque certaines IPs (erreur 451)
+            - ⏱️ **Timeout réseau** : Streamlit Cloud a des limitations de timeout
+            - 🌐 **Problèmes DNS** : Résolution DNS depuis les serveurs Streamlit Cloud
+            - 🚫 **Rate limiting** : Limitation des requêtes depuis certaines IPs
+            
+            **Solution actuelle :** L'application utilise automatiquement Yahoo Finance ou le CSV en cas d'échec de Binance.
             
             **Pour voir les logs détaillés :**
             1. Cliquez sur **"Manage app"** en bas à droite
             2. Allez dans l'onglet **"Logs"**
-            3. Recherchez les messages avec "❌" ou "⚠️"
+            3. Recherchez les messages avec "🔄", "❌" ou "✅"
             """)
     
     progress_bar.progress(0.3, text="Préparation des données")

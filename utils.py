@@ -16,6 +16,94 @@ logger = logging.getLogger(__name__)
 def to_ms(dt: datetime) -> int:
     return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
+def fetch_ohlcv_yahoo(pair: str, timeframe: str, start_date: str, end_date: str):
+    """
+    Récupère les données OHLCV depuis Yahoo Finance.
+    Fonctionne bien depuis Streamlit Cloud car Yahoo Finance n'a pas de restrictions géographiques.
+    
+    Args:
+        pair: Paire de trading (ex: "BTCUSDC" -> converti en "BTC-USD")
+        timeframe: Période (ex: "1h")
+        start_date: Date de début (format string "YYYY-MM-DD")
+        end_date: Date de fin (format string "YYYY-MM-DD")
+    
+    Returns:
+        DataFrame avec les colonnes Timestamp, Open, High, Low, Close, Volume
+    """
+    try:
+        import yfinance as yf
+        
+        # Conversion de la paire : BTCUSDC -> BTC-USD (Yahoo Finance n'a pas BTC/USDC direct)
+        # BTC-USD est très proche de BTC/USDC car USDC est indexé sur USD
+        if "BTC" in pair.upper():
+            ticker = "BTC-USD"
+        else:
+            # Fallback pour d'autres paires
+            ticker = pair.replace("USDC", "-USD").replace("USDT", "-USD")
+        
+        # Conversion du timeframe
+        # yfinance accepte: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
+        interval_map = {
+            "1m": "1m",
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1h",
+            "1d": "1d",
+        }
+        interval = interval_map.get(timeframe, "1h")
+        
+        logger.info(f"Récupération des données depuis Yahoo Finance (ticker={ticker}, interval={interval}, start={start_date}, end={end_date})")
+        
+        # Créer l'objet ticker
+        ticker_obj = yf.Ticker(ticker)
+        
+        # Récupérer les données historiques
+        # yfinance utilise des dates au format datetime
+        df = ticker_obj.history(start=start_date, end=end_date, interval=interval)
+        
+        if df.empty:
+            raise Exception(f"Aucune donnée récupérée depuis Yahoo Finance pour {ticker}")
+        
+        # Renommer et réorganiser les colonnes pour correspondre au format attendu
+        df = df.reset_index()
+        df = df.rename(columns={
+            "Datetime": "Timestamp",
+            "Open": "Open",
+            "High": "High",
+            "Low": "Low",
+            "Close": "Close",
+            "Volume": "Volume"
+        })
+        
+        # Si la colonne s'appelle "Date" au lieu de "Datetime"
+        if "Date" in df.columns and "Timestamp" not in df.columns:
+            df = df.rename(columns={"Date": "Timestamp"})
+        
+        # S'assurer que Timestamp est en UTC
+        if "Timestamp" in df.columns:
+            df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True)
+        else:
+            raise Exception("Colonne Timestamp introuvable dans les données Yahoo Finance")
+        
+        # Sélectionner uniquement les colonnes nécessaires
+        required_cols = ["Timestamp", "Open", "High", "Low", "Close", "Volume"]
+        df = df[required_cols].copy()
+        
+        # Trier par timestamp
+        df = df.sort_values("Timestamp").reset_index(drop=True)
+        
+        logger.info(f"✅ Données récupérées depuis Yahoo Finance: {len(df)} lignes")
+        return df
+        
+    except ImportError:
+        raise Exception("yfinance n'est pas installé. Installez-le avec: pip install yfinance")
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.error(f"❌ Erreur lors de la récupération depuis Yahoo Finance: {error_type}: {error_msg}")
+        raise Exception(f"Erreur Yahoo Finance: {error_type}: {error_msg}")
+
 def fetch_ohlcv_from_csv(csv_path: str, start_date: str, end_date: str):
     """
     Récupère les données OHLCV depuis un fichier CSV local (fallback).
@@ -177,7 +265,11 @@ def fetch_ohlcv_binance_with_fallback(pair: str, timeframe: str, start_date: str
                                        csv_path: str = "btc_usdc_1h_2015_2025.csv", 
                                        timeout: int = 10, max_retries: int = 2):
     """
-    Récupère les données OHLCV depuis Binance avec fallback vers CSV local.
+    Récupère les données OHLCV avec fallback multi-niveaux :
+    1. API Binance (si disponible)
+    2. Yahoo Finance (si Binance échoue - fonctionne depuis Streamlit Cloud)
+    3. CSV local (dernier recours)
+    
     Optimisé pour Streamlit Community avec timeout court et retries limités.
     
     Args:
@@ -191,38 +283,59 @@ def fetch_ohlcv_binance_with_fallback(pair: str, timeframe: str, start_date: str
     
     Returns:
         Tuple (DataFrame, str): DataFrame avec les colonnes Timestamp, Open, High, Low, Close, Volume
-                               et la source des données ("API Binance" ou "CSV local")
+                               et la source des données ("API Binance", "Yahoo Finance" ou "CSV local")
     """
     import os
     
-    logger.info(f"Tentative de récupération des données depuis Binance API (pair={pair}, timeframe={timeframe}, start={start_date}, end={end_date})")
+    logger.info(f"Tentative de récupération des données (pair={pair}, timeframe={timeframe}, start={start_date}, end={end_date})")
     
-    # Tentative de récupération via API Binance
-    # On capture TOUTES les exceptions possibles (y compris ExchangeNotAvailable)
+    # 1. Tentative de récupération via API Binance
     try:
+        logger.info("🔄 Tentative 1/3: API Binance...")
         df = fetch_ohlcv_binance(pair, timeframe, start_date, end_date, 
                                  timeout=timeout, max_retries=max_retries)
         logger.info(f"✅ Données récupérées avec succès depuis l'API Binance: {len(df)} lignes")
         return df, "API Binance"
     except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.ExchangeNotAvailable, 
             ccxt.RequestTimeout, ccxt.BaseError, Exception) as api_error:
-        # En cas d'échec (quel que soit le type d'erreur), utiliser le CSV local
         error_type = type(api_error).__name__
         error_msg = str(api_error)
         logger.warning(f"❌ Échec de l'API Binance: {error_type}: {error_msg}")
-        logger.info(f"Tentative de fallback vers le fichier CSV: {csv_path}")
         
-        if os.path.exists(csv_path):
-            try:
-                df = fetch_ohlcv_from_csv(csv_path, start_date, end_date)
-                logger.info(f"✅ Données récupérées depuis le CSV: {len(df)} lignes")
-                return df, "CSV local"
-            except Exception as csv_error:
-                logger.error(f"❌ Erreur lors de la lecture du CSV: {type(csv_error).__name__}: {str(csv_error)}")
-                raise Exception(f"Erreur API Binance: {error_type}: {error_msg}. Erreur CSV: {type(csv_error).__name__}: {str(csv_error)}")
-        else:
-            logger.error(f"❌ Fichier CSV non trouvé: {csv_path}")
-            raise Exception(f"Erreur API Binance: {error_type}: {error_msg}. Fichier CSV de fallback non trouvé: {csv_path}")
+        # 2. Tentative de récupération via Yahoo Finance (fonctionne depuis Streamlit Cloud)
+        try:
+            logger.info("🔄 Tentative 2/3: Yahoo Finance...")
+            df = fetch_ohlcv_yahoo(pair, timeframe, start_date, end_date)
+            logger.info(f"✅ Données récupérées avec succès depuis Yahoo Finance: {len(df)} lignes")
+            return df, "Yahoo Finance"
+        except Exception as yahoo_error:
+            error_type_yahoo = type(yahoo_error).__name__
+            error_msg_yahoo = str(yahoo_error)
+            logger.warning(f"❌ Échec de Yahoo Finance: {error_type_yahoo}: {error_msg_yahoo}")
+            
+            # 3. Dernier recours : CSV local
+            logger.info(f"🔄 Tentative 3/3: Fichier CSV local ({csv_path})...")
+            if os.path.exists(csv_path):
+                try:
+                    df = fetch_ohlcv_from_csv(csv_path, start_date, end_date)
+                    logger.info(f"✅ Données récupérées depuis le CSV: {len(df)} lignes")
+                    return df, "CSV local"
+                except Exception as csv_error:
+                    logger.error(f"❌ Erreur lors de la lecture du CSV: {type(csv_error).__name__}: {str(csv_error)}")
+                    raise Exception(
+                        f"Toutes les sources ont échoué:\n"
+                        f"- Binance: {error_type}: {error_msg}\n"
+                        f"- Yahoo Finance: {error_type_yahoo}: {error_msg_yahoo}\n"
+                        f"- CSV: {type(csv_error).__name__}: {str(csv_error)}"
+                    )
+            else:
+                logger.error(f"❌ Fichier CSV non trouvé: {csv_path}")
+                raise Exception(
+                    f"Toutes les sources ont échoué et le CSV est introuvable:\n"
+                    f"- Binance: {error_type}: {error_msg}\n"
+                    f"- Yahoo Finance: {error_type_yahoo}: {error_msg_yahoo}\n"
+                    f"- CSV: Fichier non trouvé ({csv_path})"
+                )
 
 def plot_backtest(backtester, plot=True):
     # On suppose que trades_df == backtester.df_trades déjà généré avec l'algo ci-dessus
