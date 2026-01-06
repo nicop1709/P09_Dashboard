@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 def to_ms(dt: datetime) -> int:
     return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
-def fetch_ohlcv_yahoo(pair: str, timeframe: str, start_date: str, end_date: str):
+def fetch_ohlcv_yahoo(pair: str, timeframe: str, start_date: str, end_date: str, max_retries: int = 3, retry_delay: int = 5):
     """
-    Récupère les données OHLCV depuis Yahoo Finance.
+    Récupère les données OHLCV depuis Yahoo Finance avec gestion des rate limits.
     Fonctionne bien depuis Streamlit Cloud car Yahoo Finance n'a pas de restrictions géographiques.
     
     Args:
@@ -26,83 +26,118 @@ def fetch_ohlcv_yahoo(pair: str, timeframe: str, start_date: str, end_date: str)
         timeframe: Période (ex: "1h")
         start_date: Date de début (format string "YYYY-MM-DD")
         end_date: Date de fin (format string "YYYY-MM-DD")
+        max_retries: Nombre max de tentatives en cas de rate limit (défaut: 3)
+        retry_delay: Délai en secondes entre les tentatives (défaut: 5)
     
     Returns:
         DataFrame avec les colonnes Timestamp, Open, High, Low, Close, Volume
     """
+    import time
+    
     try:
         import yfinance as yf
-        
-        # Conversion de la paire : BTCUSDC -> BTC-USD (Yahoo Finance n'a pas BTC/USDC direct)
-        # BTC-USD est très proche de BTC/USDC car USDC est indexé sur USD
-        if "BTC" in pair.upper():
-            ticker = "BTC-USD"
-        else:
-            # Fallback pour d'autres paires
-            ticker = pair.replace("USDC", "-USD").replace("USDT", "-USD")
-        
-        # Conversion du timeframe
-        # yfinance accepte: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
-        interval_map = {
-            "1m": "1m",
-            "5m": "5m",
-            "15m": "15m",
-            "30m": "30m",
-            "1h": "1h",
-            "1d": "1d",
-        }
-        interval = interval_map.get(timeframe, "1h")
-        
-        logger.info(f"Récupération des données depuis Yahoo Finance (ticker={ticker}, interval={interval}, start={start_date}, end={end_date})")
-        
-        # Créer l'objet ticker
-        ticker_obj = yf.Ticker(ticker)
-        
-        # Récupérer les données historiques
-        # yfinance utilise des dates au format datetime
-        df = ticker_obj.history(start=start_date, end=end_date, interval=interval)
-        
-        if df.empty:
-            raise Exception(f"Aucune donnée récupérée depuis Yahoo Finance pour {ticker}")
-        
-        # Renommer et réorganiser les colonnes pour correspondre au format attendu
-        df = df.reset_index()
-        df = df.rename(columns={
-            "Datetime": "Timestamp",
-            "Open": "Open",
-            "High": "High",
-            "Low": "Low",
-            "Close": "Close",
-            "Volume": "Volume"
-        })
-        
-        # Si la colonne s'appelle "Date" au lieu de "Datetime"
-        if "Date" in df.columns and "Timestamp" not in df.columns:
-            df = df.rename(columns={"Date": "Timestamp"})
-        
-        # S'assurer que Timestamp est en UTC
-        if "Timestamp" in df.columns:
-            df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True)
-        else:
-            raise Exception("Colonne Timestamp introuvable dans les données Yahoo Finance")
-        
-        # Sélectionner uniquement les colonnes nécessaires
-        required_cols = ["Timestamp", "Open", "High", "Low", "Close", "Volume"]
-        df = df[required_cols].copy()
-        
-        # Trier par timestamp
-        df = df.sort_values("Timestamp").reset_index(drop=True)
-        
-        logger.info(f"✅ Données récupérées depuis Yahoo Finance: {len(df)} lignes")
-        return df
-        
     except ImportError:
         raise Exception("yfinance n'est pas installé. Installez-le avec: pip install yfinance")
-    except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)
-        logger.error(f"❌ Erreur lors de la récupération depuis Yahoo Finance: {error_type}: {error_msg}")
-        raise Exception(f"Erreur Yahoo Finance: {error_type}: {error_msg}")
+    
+    # Conversion de la paire : BTCUSDC -> BTC-USD (Yahoo Finance n'a pas BTC/USDC direct)
+    # BTC-USD est très proche de BTC/USDC car USDC est indexé sur USD
+    if "BTC" in pair.upper():
+        ticker = "BTC-USD"
+    else:
+        # Fallback pour d'autres paires
+        ticker = pair.replace("USDC", "-USD").replace("USDT", "-USD")
+    
+    # Conversion du timeframe
+    # yfinance accepte: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
+    interval_map = {
+        "1m": "1m",
+        "5m": "5m",
+        "15m": "15m",
+        "30m": "30m",
+        "1h": "1h",
+        "1d": "1d",
+    }
+    interval = interval_map.get(timeframe, "1h")
+    
+    logger.info(f"Récupération des données depuis Yahoo Finance (ticker={ticker}, interval={interval}, start={start_date}, end={end_date})")
+    
+    # Tentative avec retry pour gérer les rate limits
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            # Créer l'objet ticker
+            ticker_obj = yf.Ticker(ticker)
+            
+            # Récupérer les données historiques
+            # yfinance utilise des dates au format datetime
+            df = ticker_obj.history(start=start_date, end=end_date, interval=interval)
+            
+            if df.empty:
+                raise Exception(f"Aucune donnée récupérée depuis Yahoo Finance pour {ticker}")
+            
+            # Renommer et réorganiser les colonnes pour correspondre au format attendu
+            df = df.reset_index()
+            df = df.rename(columns={
+                "Datetime": "Timestamp",
+                "Open": "Open",
+                "High": "High",
+                "Low": "Low",
+                "Close": "Close",
+                "Volume": "Volume"
+            })
+            
+            # Si la colonne s'appelle "Date" au lieu de "Datetime"
+            if "Date" in df.columns and "Timestamp" not in df.columns:
+                df = df.rename(columns={"Date": "Timestamp"})
+            
+            # S'assurer que Timestamp est en UTC
+            if "Timestamp" in df.columns:
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True)
+            else:
+                raise Exception("Colonne Timestamp introuvable dans les données Yahoo Finance")
+            
+            # Sélectionner uniquement les colonnes nécessaires
+            required_cols = ["Timestamp", "Open", "High", "Low", "Close", "Volume"]
+            df = df[required_cols].copy()
+            
+            # Trier par timestamp
+            df = df.sort_values("Timestamp").reset_index(drop=True)
+            
+            logger.info(f"✅ Données récupérées depuis Yahoo Finance: {len(df)} lignes")
+            return df
+            
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            # Vérifier si c'est un rate limit error
+            # yfinance peut lever YFRateLimitError ou des exceptions génériques avec "rate limit" dans le message
+            is_rate_limit = (
+                "rate limit" in error_msg.lower() or 
+                "YFRateLimitError" in error_type or 
+                "429" in error_msg or
+                "Too Many Requests" in error_msg
+            )
+            
+            if is_rate_limit and retry_count < max_retries - 1:
+                retry_count += 1
+                wait_time = retry_delay * retry_count  # Backoff linéaire (5s, 10s, 15s)
+                logger.warning(f"⚠️ Rate limit détecté (tentative {retry_count}/{max_retries}). Attente de {wait_time}s avant de réessayer...")
+                time.sleep(wait_time)
+                last_error = e
+                continue
+            else:
+                # Autre erreur ou max retries atteint
+                if is_rate_limit:
+                    logger.error(f"❌ Rate limit persistant après {max_retries} tentatives: {error_type}: {error_msg}")
+                else:
+                    logger.error(f"❌ Erreur lors de la récupération depuis Yahoo Finance: {error_type}: {error_msg}")
+                raise Exception(f"Erreur Yahoo Finance: {error_type}: {error_msg}")
+    
+    # Si on arrive ici, toutes les tentatives ont échoué
+    raise Exception(f"Échec après {max_retries} tentatives. Dernière erreur: {type(last_error).__name__}: {str(last_error)}")
 
 def fetch_ohlcv_from_csv(csv_path: str, start_date: str, end_date: str):
     """
@@ -305,7 +340,10 @@ def fetch_ohlcv_binance_with_fallback(pair: str, timeframe: str, start_date: str
         # 2. Tentative de récupération via Yahoo Finance (fonctionne depuis Streamlit Cloud)
         try:
             logger.info("🔄 Tentative 2/3: Yahoo Finance...")
-            df = fetch_ohlcv_yahoo(pair, timeframe, start_date, end_date)
+            # Ajouter un petit délai avant d'essayer Yahoo Finance pour éviter les rate limits
+            import time
+            time.sleep(2)  # Délai de 2 secondes pour éviter les rate limits
+            df = fetch_ohlcv_yahoo(pair, timeframe, start_date, end_date, max_retries=3, retry_delay=10)
             logger.info(f"✅ Données récupérées avec succès depuis Yahoo Finance: {len(df)} lignes")
             return df, "Yahoo Finance"
         except Exception as yahoo_error:

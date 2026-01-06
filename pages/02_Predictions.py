@@ -43,16 +43,6 @@ try:
     
     # Utilisation de la fonction avec fallback (timeout court pour Streamlit Community)
     try:
-        # Afficher les détails de la tentative dans l'interface
-        with st.expander("🔍 Détails de la connexion API", expanded=False):
-            st.write(f"**Pair**: BTCUSDC")
-            st.write(f"**Timeframe**: 1h")
-            st.write(f"**Période**: {format(datetime.now()-timedelta(days=7),'%Y-%m-%d')} à {format(datetime.now(),'%Y-%m-%d')}")
-            st.write(f"**Timeout**: 15 secondes")
-            st.write(f"**Max retries**: 2")
-            st.info("💡 **Ordre de tentative** : 1) Binance API → 2) Yahoo Finance → 3) CSV local")
-            st.info("💡 Les logs détaillés sont disponibles dans les logs Streamlit Cloud")
-        
         last_data, data_source = fetch_ohlcv_binance_with_fallback(
             "BTCUSDC", 
             "1h", 
@@ -64,47 +54,7 @@ try:
     except Exception as e:
         # Si même le fallback échoue, afficher l'erreur
         st.error(f"❌ Erreur lors de la récupération des données: {str(e)}")
-        st.info("💡 **Conseil**: Vérifiez votre connexion internet ou que le fichier CSV est présent dans le projet.")
-        with st.expander("📋 Comment voir les logs détaillés sur Streamlit Cloud"):
-            st.markdown("""
-            1. Cliquez sur **"Manage app"** en bas à droite de votre application
-            2. Allez dans l'onglet **"Logs"**
-            3. Vous verrez les logs détaillés avec les erreurs exactes
-            4. Les logs incluent :
-               - Les tentatives de connexion à l'API Binance
-               - Les types d'erreurs (NetworkError, ExchangeNotAvailable, etc.)
-               - Les messages d'erreur complets
-            """)
         st.stop()
-    
-    # Afficher la source des données
-    if data_source == "API Binance":
-        st.success("✅ Données récupérées depuis l'API Binance")
-    elif data_source == "Yahoo Finance":
-        st.success("✅ Données récupérées depuis Yahoo Finance")
-        st.info("💡 Yahoo Finance est utilisé car l'API Binance n'est pas accessible depuis Streamlit Cloud (restrictions géographiques).")
-    else:
-        st.warning("⚠️ Données récupérées depuis le fichier CSV local (APIs indisponibles)")
-        with st.expander("🔍 Pourquoi les APIs ne fonctionnent pas ?", expanded=False):
-            st.markdown("""
-            **Ordre de tentative des sources de données :**
-            1. 🔄 **API Binance** - Source principale (peut être bloquée depuis Streamlit Cloud)
-            2. 🔄 **Yahoo Finance** - Source alternative (fonctionne généralement depuis Streamlit Cloud)
-            3. 📁 **CSV local** - Dernier recours
-            
-            **Causes possibles d'échec :**
-            - 🔒 **Restrictions géographiques** : Binance bloque certaines IPs (erreur 451)
-            - ⏱️ **Timeout réseau** : Streamlit Cloud a des limitations de timeout
-            - 🌐 **Problèmes DNS** : Résolution DNS depuis les serveurs Streamlit Cloud
-            - 🚫 **Rate limiting** : Limitation des requêtes depuis certaines IPs
-            
-            **Solution actuelle :** L'application utilise automatiquement Yahoo Finance ou le CSV en cas d'échec de Binance.
-            
-            **Pour voir les logs détaillés :**
-            1. Cliquez sur **"Manage app"** en bas à droite
-            2. Allez dans l'onglet **"Logs"**
-            3. Recherchez les messages avec "🔄", "❌" ou "✅"
-            """)
     
     progress_bar.progress(0.3, text="Préparation des données")
     last_data_model, features_cols_model = prepare_data_advanced_features(last_data, 24, 0.002)
@@ -126,14 +76,31 @@ try:
     current_time = to_datetime(datetime.now(timezone.utc), utc=True)
     time_diff_minutes = (current_time - last_timestamp).total_seconds() / 60
     
+    # Calculer le temps jusqu'à la prochaine heure complète
     if time_diff_minutes < 5:
+        # Données très récentes (< 5 minutes)
         st.success(f"Le signal TabNet pour les 5 premières minutes de l'heure est : ***{'Buy' if tabnet_pred[-1] == 1 else 'No-trade or Sell'}***")
         fig = plot_predictions(last_data, tabnet_pred[-1], plot=False)
         st.plotly_chart(fig)
-    else:
-        wait_minutes = round((last_timestamp + timedelta(minutes=60) - current_time).total_seconds() / 60)
+    elif time_diff_minutes < 60:
+        # Données dans la dernière heure : calculer le temps jusqu'à la prochaine heure complète
+        # Calculer l'heure suivante après last_timestamp
+        next_hour = last_timestamp.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        # Si next_hour est dans le passé, prendre l'heure suivante
+        if next_hour <= current_time:
+            next_hour = current_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        
+        wait_minutes = round((next_hour - current_time).total_seconds() / 60)
+        wait_minutes = max(0, min(60, wait_minutes))  # Limiter entre 0 et 60 minutes
+        
         st.warning(f"Le signal TabNet n'est pas disponible pour trader, il faut attendre **{wait_minutes} minutes**")
         st.warning(f"Si la tendance ne change pas le signal est actuellement : {'***Buy***' if tabnet_pred[-1] == 1 else 'No-trade or Sell'}")
+        fig = plot_predictions(last_data, tabnet_pred[-1], plot=False)
+        st.plotly_chart(fig)
+    else:
+        # Données anciennes (plus d'une heure) - ne pas calculer wait_minutes
+        st.warning(f"Les données sont anciennes ({int(time_diff_minutes)} minutes). Le signal n'est pas disponible pour trader.")
+        st.warning(f"Signal basé sur les dernières données disponibles : {'***Buy***' if tabnet_pred[-1] == 1 else 'No-trade or Sell'}")
         fig = plot_predictions(last_data, tabnet_pred[-1], plot=False)
         st.plotly_chart(fig)
         
