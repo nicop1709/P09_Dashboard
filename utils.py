@@ -7,6 +7,11 @@ import matplotlib.pyplot as plt
 import ta
 import ccxt
 from datetime import datetime, timezone
+import logging
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def to_ms(dt: datetime) -> int:
     return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
@@ -62,6 +67,7 @@ def fetch_ohlcv_binance(pair: str, timeframe: str, start_date: int, end_date: in
     import time
     
     # Configuration de ccxt avec timeout et options pour Streamlit Community
+    logger.info(f"Initialisation de l'exchange Binance avec timeout={timeout}s, max_retries={max_retries}")
     try:
         ex = ccxt.binance({
             "enableRateLimit": True,
@@ -71,18 +77,22 @@ def fetch_ohlcv_binance(pair: str, timeframe: str, start_date: int, end_date: in
             },
             "rateLimit": 1200,  # Limite de rate (ms entre requêtes)
         })
+        logger.info("Exchange Binance initialisé avec succès")
         
         # Essayer de charger les markets manuellement avec gestion d'erreur
         # Cela évite que load_markets() soit appelé automatiquement lors du premier fetch_ohlcv
         try:
+            logger.info("Tentative de chargement des markets...")
             ex.load_markets()
+            logger.info("Markets chargés avec succès")
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout, 
                 ccxt.BaseError, Exception) as market_error:
             # Si le chargement des markets échoue, on continue quand même
             # car certaines paires peuvent fonctionner sans markets chargés
-            pass
+            logger.warning(f"Échec du chargement des markets (continuons quand même): {type(market_error).__name__}: {str(market_error)}")
             
     except Exception as e:
+        logger.error(f"Erreur lors de l'initialisation de l'exchange Binance: {type(e).__name__}: {str(e)}")
         raise Exception(f"Erreur lors de l'initialisation de l'exchange Binance: {str(e)}")
     
     all_rows = []
@@ -100,7 +110,9 @@ def fetch_ohlcv_binance(pair: str, timeframe: str, start_date: int, end_date: in
             try:
                 # Tentative de récupération des données
                 # Note: load_markets() est appelé automatiquement par fetch_ohlcv
+                logger.info(f"Tentative {retry_count + 1}/{max_retries} de récupération des données pour since={since}")
                 batch = ex.fetch_ohlcv(pair, timeframe=timeframe, since=since, limit=limit)
+                logger.info(f"Données récupérées avec succès: {len(batch)} candles")
                 break  # Succès, sortir de la boucle de retry
                 
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout, 
@@ -108,26 +120,39 @@ def fetch_ohlcv_binance(pair: str, timeframe: str, start_date: int, end_date: in
                 # Erreur réseau (timeout, connexion, exchange non disponible, etc.)
                 retry_count += 1
                 last_error = e
+                error_type = type(e).__name__
+                error_msg = str(e)
+                logger.warning(f"Erreur réseau/exchange (tentative {retry_count}/{max_retries}): {error_type}: {error_msg}")
                 if retry_count < max_retries:
                     # Attendre avant de réessayer (backoff exponentiel)
                     wait_time = min(2 ** retry_count, 10)
+                    logger.info(f"Attente de {wait_time}s avant de réessayer...")
                     time.sleep(wait_time)
                 else:
-                    raise Exception(f"Erreur réseau/exchange après {max_retries} tentatives pour la période {since}: {str(e)}")
+                    logger.error(f"Échec après {max_retries} tentatives: {error_type}: {error_msg}")
+                    raise Exception(f"Erreur réseau/exchange après {max_retries} tentatives pour la période {since}: {error_type}: {error_msg}")
             
             except ccxt.ExchangeError as e:
                 # Erreur de l'exchange (rate limit, etc.)
                 retry_count += 1
                 last_error = e
+                error_type = type(e).__name__
+                error_msg = str(e)
+                logger.warning(f"Erreur de l'exchange (tentative {retry_count}/{max_retries}): {error_type}: {error_msg}")
                 if retry_count < max_retries:
                     wait_time = min(2 ** retry_count, 10)
+                    logger.info(f"Attente de {wait_time}s avant de réessayer...")
                     time.sleep(wait_time)
                 else:
-                    raise Exception(f"Erreur de l'exchange après {max_retries} tentatives pour la période {since}: {str(e)}")
+                    logger.error(f"Échec après {max_retries} tentatives: {error_type}: {error_msg}")
+                    raise Exception(f"Erreur de l'exchange après {max_retries} tentatives pour la période {since}: {error_type}: {error_msg}")
             
             except Exception as e:
                 # Autre erreur - ne pas retry
-                raise Exception(f"Erreur inattendue lors de la récupération des données: {str(e)}")
+                error_type = type(e).__name__
+                error_msg = str(e)
+                logger.error(f"Erreur inattendue: {error_type}: {error_msg}")
+                raise Exception(f"Erreur inattendue lors de la récupération des données: {error_type}: {error_msg}")
         
         if not batch:
             break
@@ -170,23 +195,34 @@ def fetch_ohlcv_binance_with_fallback(pair: str, timeframe: str, start_date: str
     """
     import os
     
+    logger.info(f"Tentative de récupération des données depuis Binance API (pair={pair}, timeframe={timeframe}, start={start_date}, end={end_date})")
+    
     # Tentative de récupération via API Binance
     # On capture TOUTES les exceptions possibles (y compris ExchangeNotAvailable)
     try:
         df = fetch_ohlcv_binance(pair, timeframe, start_date, end_date, 
                                  timeout=timeout, max_retries=max_retries)
+        logger.info(f"✅ Données récupérées avec succès depuis l'API Binance: {len(df)} lignes")
         return df, "API Binance"
     except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.ExchangeNotAvailable, 
             ccxt.RequestTimeout, ccxt.BaseError, Exception) as api_error:
         # En cas d'échec (quel que soit le type d'erreur), utiliser le CSV local
+        error_type = type(api_error).__name__
+        error_msg = str(api_error)
+        logger.warning(f"❌ Échec de l'API Binance: {error_type}: {error_msg}")
+        logger.info(f"Tentative de fallback vers le fichier CSV: {csv_path}")
+        
         if os.path.exists(csv_path):
             try:
                 df = fetch_ohlcv_from_csv(csv_path, start_date, end_date)
+                logger.info(f"✅ Données récupérées depuis le CSV: {len(df)} lignes")
                 return df, "CSV local"
             except Exception as csv_error:
-                raise Exception(f"Erreur API Binance: {str(api_error)}. Erreur CSV: {str(csv_error)}")
+                logger.error(f"❌ Erreur lors de la lecture du CSV: {type(csv_error).__name__}: {str(csv_error)}")
+                raise Exception(f"Erreur API Binance: {error_type}: {error_msg}. Erreur CSV: {type(csv_error).__name__}: {str(csv_error)}")
         else:
-            raise Exception(f"Erreur API Binance: {str(api_error)}. Fichier CSV de fallback non trouvé: {csv_path}")
+            logger.error(f"❌ Fichier CSV non trouvé: {csv_path}")
+            raise Exception(f"Erreur API Binance: {error_type}: {error_msg}. Fichier CSV de fallback non trouvé: {csv_path}")
 
 def plot_backtest(backtester, plot=True):
     # On suppose que trades_df == backtester.df_trades déjà généré avec l'algo ci-dessus

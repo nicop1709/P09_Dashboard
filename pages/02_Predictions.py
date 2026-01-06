@@ -6,13 +6,19 @@ from plotly.subplots import make_subplots
 from pandas import to_datetime
 import numpy as np
 from backtest import Backtest
-from datetime import datetime
+from datetime import datetime, timezone
 from utils import fetch_ohlcv_binance_with_fallback, prepare_data_advanced_features, plot_predictions
 from sklearn.preprocessing import StandardScaler
 import joblib
 
-scaler = joblib.load("models/tabnet_scaler.pkl")
-tabnet_model = joblib.load("models/tabnet_model.pkl")
+# Chargement des modèles pré-entraînés
+# Note: Les warnings InconsistentVersionWarning sont normaux si le modèle a été sauvegardé
+# avec une version antérieure de scikit-learn. La compatibilité ascendante est généralement assurée.
+import warnings
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
+    scaler = joblib.load("models/tabnet_scaler.pkl")
+    tabnet_model = joblib.load("models/tabnet_model.pkl")
 
 st.set_page_config(page_icon=":moneybag:")
 
@@ -37,18 +43,37 @@ try:
     
     # Utilisation de la fonction avec fallback (timeout court pour Streamlit Community)
     try:
+        # Afficher les détails de la tentative dans l'interface
+        with st.expander("🔍 Détails de la connexion API", expanded=False):
+            st.write(f"**Pair**: BTCUSDC")
+            st.write(f"**Timeframe**: 1h")
+            st.write(f"**Période**: {format(datetime.now()-timedelta(days=7),'%Y-%m-%d')} à {format(datetime.now(),'%Y-%m-%d')}")
+            st.write(f"**Timeout**: 15 secondes")
+            st.write(f"**Max retries**: 2")
+            st.info("💡 Les logs détaillés sont disponibles dans les logs Streamlit Cloud (voir instructions ci-dessous)")
+        
         last_data, data_source = fetch_ohlcv_binance_with_fallback(
             "BTCUSDC", 
             "1h", 
             format(datetime.now()-timedelta(days=7),"%Y-%m-%d"), 
             format(datetime.now(),"%Y-%m-%d"),
-            timeout=5,  # Timeout très court pour Streamlit Community (5 secondes)
-            max_retries=1  # Une seule tentative pour éviter les timeouts longs
+            timeout=15,  # Timeout pour Streamlit Community (15 secondes - compromis entre vitesse et fiabilité)
+            max_retries=2  # Deux tentatives pour plus de robustesse
         )
     except Exception as e:
         # Si même le fallback échoue, afficher l'erreur
         st.error(f"❌ Erreur lors de la récupération des données: {str(e)}")
         st.info("💡 **Conseil**: Vérifiez votre connexion internet ou que le fichier CSV est présent dans le projet.")
+        with st.expander("📋 Comment voir les logs détaillés sur Streamlit Cloud"):
+            st.markdown("""
+            1. Cliquez sur **"Manage app"** en bas à droite de votre application
+            2. Allez dans l'onglet **"Logs"**
+            3. Vous verrez les logs détaillés avec les erreurs exactes
+            4. Les logs incluent :
+               - Les tentatives de connexion à l'API Binance
+               - Les types d'erreurs (NetworkError, ExchangeNotAvailable, etc.)
+               - Les messages d'erreur complets
+            """)
         st.stop()
     
     # Afficher la source des données
@@ -56,6 +81,21 @@ try:
         st.success("✅ Données récupérées depuis l'API Binance")
     else:
         st.warning("⚠️ Données récupérées depuis le fichier CSV local (API Binance indisponible)")
+        with st.expander("🔍 Pourquoi l'API Binance ne fonctionne pas ?", expanded=False):
+            st.markdown("""
+            **Causes possibles :**
+            - ⏱️ **Timeout réseau** : Streamlit Cloud a des limitations de timeout réseau
+            - 🔒 **Restrictions réseau** : Certaines IPs de Streamlit Cloud peuvent être bloquées par Binance
+            - 🌐 **Problèmes DNS** : Résolution DNS depuis les serveurs Streamlit Cloud
+            - 🚫 **Rate limiting** : Binance peut limiter les requêtes depuis certaines IPs
+            
+            **Solution actuelle :** L'application utilise automatiquement le fichier CSV en cas d'échec de l'API.
+            
+            **Pour voir les logs détaillés :**
+            1. Cliquez sur **"Manage app"** en bas à droite
+            2. Allez dans l'onglet **"Logs"**
+            3. Recherchez les messages avec "❌" ou "⚠️"
+            """)
     
     progress_bar.progress(0.3, text="Préparation des données")
     last_data_model, features_cols_model = prepare_data_advanced_features(last_data, 24, 0.002)
@@ -74,7 +114,7 @@ try:
     
     # Vérifier si les données sont récentes
     last_timestamp = last_data_model['Timestamp'].iloc[-1]
-    current_time = to_datetime(datetime.utcnow(), utc=True)
+    current_time = to_datetime(datetime.now(timezone.utc), utc=True)
     time_diff_minutes = (current_time - last_timestamp).total_seconds() / 60
     
     if time_diff_minutes < 5:

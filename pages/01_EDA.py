@@ -159,10 +159,20 @@ stats_dict = {
     "Nb trades par jour": f"{backtest_prefect.nb_trades_by_day:.2f}",
 }
 stats_df = pd.DataFrame(stats_dict.items(), columns=["Statistique", "Valeur"])
-st.dataframe(stats_df)
+# Utiliser st.table() pour les données avec des strings formatées pour éviter les erreurs Arrow
+st.table(stats_df)
 
 st.subheader("Liste des trades du backtest parfait")
-st.dataframe(pd.DataFrame(backtest_prefect.trade_list))
+trades_df = pd.DataFrame(backtest_prefect.trade_list)
+if len(trades_df) > 0:
+    # S'assurer que les colonnes numériques sont bien numériques pour éviter les erreurs Arrow
+    numeric_cols = ['idx', 'idx_entry', 'qty', 'entry_price', 'exit_price', 'PnL', 'PnL_net', 'Capital', 'MaxDrawDown']
+    for col in numeric_cols:
+        if col in trades_df.columns:
+            trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
+    st.dataframe(trades_df, use_container_width=True)
+else:
+    st.info("Aucun trade effectué")
 
 fig = plot_backtest(backtest_prefect, plot=False)
 st.plotly_chart(fig)
