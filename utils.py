@@ -70,9 +70,44 @@ def fetch_ohlcv_yahoo(pair: str, timeframe: str, start_date: str, end_date: str,
             # Créer l'objet ticker
             ticker_obj = yf.Ticker(ticker)
             
-            # Récupérer les données historiques
-            # yfinance utilise des dates au format datetime
-            df = ticker_obj.history(start=start_date, end=end_date, interval=interval)
+            # Pour les données récentes, Yahoo Finance fonctionne mieux avec 'period' qu'avec 'start'/'end'
+            # Pour les intervalles intraday (1h, etc.), utiliser 'period' pour obtenir les données les plus récentes
+            # period peut être: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
+            # Calculer le nombre de jours nécessaire
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            days_diff = (end_dt - start_dt).days
+            
+            # Pour les périodes courtes (≤ 60 jours), utiliser period pour obtenir les données les plus récentes
+            # C'est particulièrement important pour les données intraday récentes (1h, etc.)
+            # Yahoo Finance avec 'period' retourne les données jusqu'à maintenant, ce qui est mieux pour les données récentes
+            if days_diff <= 60:
+                # Utiliser period avec un peu plus de jours pour être sûr d'avoir toutes les données
+                # Pour 7 jours, on demande 8-10 jours pour avoir les données les plus récentes
+                period_days = max(7, days_diff + 3)  # Au moins 7 jours, ou jours demandés + 3
+                period = f"{period_days}d"
+                logger.info(f"Utilisation de period={period} pour récupérer les données récentes (interval={interval})")
+                df = ticker_obj.history(period=period, interval=interval)
+                
+                # Filtrer les données pour la période demandée (mais garder les données récentes)
+                if not df.empty:
+                    start_dt_utc = pd.to_datetime(start_date, utc=True)
+                    end_dt_utc = pd.to_datetime(end_date, utc=True)
+                    # S'assurer que les timestamps sont en UTC pour la comparaison
+                    if df.index.tz is None:
+                        df.index = df.index.tz_localize('UTC')
+                    elif df.index.tz != timezone.utc:
+                        df.index = df.index.tz_convert('UTC')
+                    
+                    # Filtrer par date de début, mais garder toutes les données jusqu'à maintenant
+                    # (ne pas filtrer par end_date pour garder les données les plus récentes)
+                    current_time_utc = pd.to_datetime(datetime.now(timezone.utc), utc=True)
+                    df = df[(df.index >= start_dt_utc) & (df.index <= current_time_utc)]
+                    logger.info(f"Données filtrées: {len(df)} lignes de {df.index.min()} à {df.index.max()}")
+            else:
+                # Pour les périodes plus longues, utiliser start/end
+                logger.info(f"Utilisation de start/end pour période longue ({days_diff} jours)")
+                df = ticker_obj.history(start=start_date, end=end_date, interval=interval)
             
             if df.empty:
                 raise Exception(f"Aucune donnée récupérée depuis Yahoo Finance pour {ticker}")
