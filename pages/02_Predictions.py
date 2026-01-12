@@ -65,6 +65,22 @@ try:
     progress_bar.progress(0.8, text="Prédiction TabNet")
     tabnet_pred_tab = tabnet_model.predict_proba(last_data_model_s)[:, 1]
     
+    progress_bar.progress(0.9, text="Calcul de l'explicabilité locale")
+    # Calculer l'explicabilité pour la dernière prédiction
+    last_sample = last_data_model_s[-1:]  # Prendre la dernière ligne (déjà en format 2D)
+    try:
+        tabnet_explain = tabnet_model.explain(last_sample)
+
+        # Si explain() retourne un tuple, prendre le premier élément (masks ou importance)
+        if isinstance(tabnet_explain, tuple):
+            tabnet_explain = tabnet_explain[0]
+        # Convertir en numpy array si nécessaire
+        if not isinstance(tabnet_explain, np.ndarray):
+            tabnet_explain = np.array(tabnet_explain)
+    except Exception as explain_error:
+        st.warning(f"⚠️ Impossible de calculer l'explicabilité: {str(explain_error)}")
+        tabnet_explain = None
+    
     progress_bar.progress(1.0, text="Fin de la prédiction")
     tabnet_pred = (tabnet_pred_tab >= 0.5).astype(int)
     
@@ -103,7 +119,55 @@ try:
         st.warning(f"Signal basé sur les dernières données disponibles : {'***Buy***' if tabnet_pred[-1] == 1 else 'No-trade or Sell'}")
         fig = plot_predictions(last_data, tabnet_pred[-1], plot=False)
         st.plotly_chart(fig)
+    
+    # Graphique d'explicabilité locale
+    if tabnet_explain is not None:
+        st.header("Explicabilité locale de la prédiction TabNet")
+        st.write("Ce graphique montre l'importance de chaque feature pour la dernière prédiction.")
         
+        # Extraire l'importance des features pour la dernière prédiction
+        # tabnet_explain retourne un array de shape (n_samples, n_features)
+        feature_importance = tabnet_explain[0] if len(tabnet_explain.shape) > 1 else tabnet_explain  # Prendre la première (et seule) prédiction
+        
+        # Créer un DataFrame pour faciliter la visualisation
+        importance_df = pd.DataFrame({
+            'Feature': features_cols_model,
+            'Importance': feature_importance
+        })
+        
+        # Trier par valeur absolue de l'importance
+        importance_df['Abs_Importance'] = importance_df['Importance'].abs()
+        importance_df = importance_df.sort_values('Abs_Importance', ascending=True)
+        
+        # Créer le graphique en barres horizontal
+        fig_explain = go.Figure()
+        
+        # Couleurs selon le signe de l'importance
+        colors = ['green' if x > 0 else 'red' for x in importance_df['Importance']]
+        
+        fig_explain.add_trace(go.Bar(
+            x=importance_df['Importance'],
+            y=importance_df['Feature'],
+            orientation='h',
+            marker=dict(color=colors),
+            text=[f"{x:.4f}" for x in importance_df['Importance']],
+            textposition='outside',
+            name='Importance'
+        ))
+        
+        fig_explain.update_layout(
+            title='Importance des features pour la prédiction locale (TabNet)',
+            xaxis_title='Importance',
+            yaxis_title='Feature',
+            height=600,
+            width=1000,
+            showlegend=False,
+            xaxis=dict(zeroline=True, zerolinewidth=2, zerolinecolor='black')
+        )
+        
+        st.plotly_chart(fig_explain, use_container_width=True)
+    
+
 except Exception as e:
     st.error(f"❌ Erreur lors du traitement: {str(e)}")
     st.exception(e)
